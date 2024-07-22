@@ -336,8 +336,8 @@ class Record(BaseModel, ABC):
             hashes = list(hashes)
         if not isinstance(hashes, list):
             hashes = [hashes]
-        items = AARS.fetch_records(cls, list(hashes))
-        return PageableResponse(items)
+        items, total_items = AARS.fetch_records(cls, list(hashes))
+        return PageableResponse(items, total_items)
 
     @classmethod
     def fetch_objects(cls: Type[R]) -> PageableRequest[R]:
@@ -392,8 +392,8 @@ class Record(BaseModel, ABC):
         """
         query = IndexQuery(cls, **kwargs)
         index = cls.get_index(query.get_index_name())
-        generator = index.lookup_and_fetch(query)
-        return PageableResponse(generator)
+        generator, total_items = index.lookup_and_fetch(query)
+        return PageableResponse(generator, total_items)
 
     @classmethod
     def add_index(cls: Type[R], index: "Index") -> None:
@@ -588,7 +588,7 @@ class Index(Record, Generic[R]):
 
         return item_hashes, needs_filtering
 
-    def lookup_and_fetch(self, query: IndexQuery) -> AsyncIterator[R]:
+    def lookup_and_fetch(self, query: IndexQuery) -> AsyncIterator[Tuple[R, int]]:
         """
         Fetches records with given values for the indexed properties.
 
@@ -598,7 +598,7 @@ class Index(Record, Generic[R]):
             index_query = IndexQuery(MyRecord, **{'foo': 'bar'})
             index.lookup(index_query)
             ```
-            Returns all records of type `MyRecord` where `foo` is equal to `'bar'`.
+          records_iterator  Returns all records of type `MyRecord` where `foo` is equal to `'bar'`.
             This is an anti-pattern, as the `IndexQuery` should be created by calling `MyRecord.filter(foo='bar')`
             instead.
 
@@ -612,23 +612,23 @@ class Index(Record, Generic[R]):
         if not item_hashes:
             return EmptyAsyncIterator()
 
-        items = AARS.fetch_records(self.record_type, list(item_hashes))
+        records_iterator = AARS.fetch_records(self.record_type, list(item_hashes))
 
         if needs_filtering:
-            return self._filter_index_items(items, query)
-        return items
+            return self._filter_index_items(records_iterator, query)
+        return 
 
     @classmethod
     async def _filter_index_items(
-        cls, items: AsyncIterator[R], query: IndexQuery
-    ) -> AsyncIterator[R]:
-        async for item in items:
+        cls, items: AsyncIterator[Tuple[R, int]], query: IndexQuery
+    ) -> AsyncIterator[Tuple[R, int]]:
+        async for item, total_items in items:
             class_properties = item.content
             if all(
                 query.comparators[key].value(value, class_properties[key])
                 for key, value in query.items()
             ):
-                yield item
+                yield (item, total_items)
 
     def add_record(self, obj: R):
         """Adds a record to the index."""
@@ -815,7 +815,7 @@ class AARS:
         owner: Optional[str] = None,
         page_size: int = 50,
         page: Optional[int] = 1,
-    ) -> AsyncIterator[R]:
+    ) -> AsyncIterator[Tuple[R, int]]:
         """
         Retrieves posts as objects by its aleph item_hash.
         Args:
@@ -846,7 +846,7 @@ class AARS:
             for record in records:
                 cached_ids.append(record.item_hash)
                 record.changed = False
-                yield record
+                yield (record, len(records))
                 if page:
                     # If we are fetching a specific page, we need to track the number of records returned
                     # as the cache does not know about the pagination
@@ -864,7 +864,7 @@ class AARS:
             # and track the number of records returned instead
             page = None
 
-        async for record in cls._fetch_records_from_api(
+        async for record, total_item in cls._fetch_records_from_api(
             record_type=record_type,
             item_hashes=item_hashes,
             channels=channels,
@@ -873,7 +873,7 @@ class AARS:
             page=page,
         ):
             record.changed = False
-            yield record
+            yield (record, total_item)
             if returned_records:
                 # Only triggers if we are fetching a specific page
                 returned_records += 1
@@ -920,7 +920,7 @@ class AARS:
         refs: Optional[List[str]] = None,
         page_size: int = 50,
         page: Optional[int] = 1,
-    ) -> AsyncIterator[R]:
+    ) -> AsyncIterator[Tuple[R, int]]:
         """
         Retrieves posts as objects by its aleph item_hash.
         Args:
@@ -932,7 +932,7 @@ class AARS:
             page_size: Number of items to fetch per page.
             page: If None, will fetch all pages.
         Returns:
-            An iterator over the found records.
+            An iterator over tuples of the found records and the total item count.
         """
         aleph_resp = None
         retries = cls.retry_count
@@ -956,17 +956,17 @@ class AARS:
                 retries -= 1
                 if retries == 0:
                     raise
+        total_items = aleph_resp["pagination_total"]
 
         for post in aleph_resp["posts"]:
-            yield await record_type.from_dict(post)
+            yield (await record_type.from_dict(post), total_items)
 
         if page is None:
             # Get all pages iteratively if page is not specified
-            total_items = aleph_resp["pagination_total"]
             per_page = aleph_resp["pagination_per_page"]
             if total_items > per_page:
                 for next_page in range(2, math.ceil(total_items / per_page) + 1):
-                    async for record in cls._fetch_records_from_api(
+                    async for record, new_total_item in cls._fetch_records_from_api(
                         record_type=record_type,
                         item_hashes=item_hashes,
                         channels=channels,
@@ -974,7 +974,7 @@ class AARS:
                         refs=refs,
                         page=next_page,
                     ):
-                        yield record
+                        yield (record, new_total_item)
 
     @classmethod
     async def fetch_revisions(

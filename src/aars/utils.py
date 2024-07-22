@@ -178,9 +178,12 @@ class PageableResponse(AsyncIterator[T], Generic[T]):
 
     record_generator: AsyncIterator[T]
     used: bool = False
+    total_records: Optional[int]
 
-    def __init__(self, record_generator: AsyncIterator[T]):
+    def __init__(self, record_generator: AsyncIterator[T], total_records: Optional[int] = None):
         self.record_generator = record_generator
+        self.total_records = total_records
+
 
     async def all(self) -> List[T]:
         """
@@ -244,6 +247,16 @@ class PageableResponse(AsyncIterator[T], Generic[T]):
             return self.record_generator.__anext__()
         except StopAsyncIteration as e:
             raise e
+    
+    def get_total_records(self) -> Optional[int]:
+        """
+        Get the total number of records, if available.
+
+        Returns:
+            The total number of records, or None if not available.
+        """
+        return self.total_records
+
 
 
 class PageableRequest(AsyncIterator[T], Generic[T]):
@@ -271,7 +284,8 @@ class PageableRequest(AsyncIterator[T], Generic[T]):
         self.kwargs = kwargs
 
     def __await__(self):
-        self._response = PageableResponse(self.func(*self.args, **self.kwargs))
+        generator, total_items = self.func(*self.args, **self.kwargs)
+        self._response = PageableResponse(generator, total_items)
         return self._response
 
     def __aiter__(self) -> AsyncIterator[T]:
@@ -287,9 +301,9 @@ class PageableRequest(AsyncIterator[T], Generic[T]):
         """
         if self._response is None:
             # Trigger the request to get all records
-            self._response = PageableResponse(
-                self.func(*self.args, **self.kwargs, page=None, page_size=50)
-            )
+            generator, total_items = self.func(*self.args, **self.kwargs, page=None, page_size=50)
+            self._response = PageableResponse(generator, total_items)
+
         return self._response
 
     async def all(self) -> List[T]:
@@ -309,9 +323,8 @@ class PageableRequest(AsyncIterator[T], Generic[T]):
         Returns:
             A list of records on the specified page.
         """
-        self._response = PageableResponse(
-            self.func(*self.args, **self.kwargs, page=page, page_size=page_size)
-        )
+        generator, total_items = self.func(*self.args, **self.kwargs, page=page, page_size=page_size)
+        self._response = PageableResponse(generator, total_items)
         return await self.response.all()
 
     async def first(self) -> Optional[T]:
@@ -320,9 +333,8 @@ class PageableRequest(AsyncIterator[T], Generic[T]):
         Returns:
             The first record, or None if there are no records.
         """
-        self._response = PageableResponse(
-            self.func(*self.args, **self.kwargs, page=1, page_size=1)
-        )
+        gen, total_items = self.func(*self.args, **self.kwargs, page=1, page_size=1)
+        self._response = PageableResponse(gen, total_items)
         return await self.response.first()
 
 
